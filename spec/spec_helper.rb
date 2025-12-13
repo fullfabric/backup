@@ -38,6 +38,11 @@ RSpec.configure do |config|
   config.filter_run focus: true
   config.run_all_when_everything_filtered = true
 
+  # Suppress thread exception reporting in tests
+  # Tests intentionally raise exceptions in threads to verify error handling,
+  # and we don't want those expected exceptions cluttering the test output
+  Thread.report_on_exception = false if Thread.respond_to?(:report_on_exception=)
+
   config.before(:suite) do
     # Initializes SandboxFileUtils so the first call to deactivate!(:noop)
     # will set ::FileUtils to FileUtils::NoWrite
