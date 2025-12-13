@@ -25,9 +25,11 @@ Gem::Specification.new do |gem|
   gem.require_path  = "lib"
   gem.executables   = ["backup"]
 
-  gem.required_ruby_version = Gem::Requirement.new(">= 2.7.0")
-
+  gem.required_ruby_version = Gem::Requirement.new("~> 2.7")
+  
   gem.add_dependency "activesupport", "~> 6"
+  gem.add_dependency "zeitwerk", "< 2.7"
+  
   gem.add_dependency "aws-sdk", "~> 2"
   gem.add_dependency "dogapi", "1.40.0"
   gem.add_dependency "dropbox-sdk", "1.6.5"
