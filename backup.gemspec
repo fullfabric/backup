@@ -26,10 +26,9 @@ Gem::Specification.new do |gem|
   gem.executables   = ["backup"]
 
   gem.required_ruby_version = Gem::Requirement.new("~> 2.7")
-  
+
   gem.add_dependency "activesupport", "~> 6"
-  gem.add_dependency "zeitwerk", "< 2.7"
-  
+
   gem.add_dependency "aws-sdk", "~> 2"
   gem.add_dependency "dogapi", "1.40.0"
   gem.add_dependency "dropbox-sdk", "1.6.5"
@@ -50,6 +49,11 @@ Gem::Specification.new do |gem|
   gem.add_dependency "thor"
   gem.add_dependency "twitter", "~> 6.0"
   gem.add_dependency "unf", "0.1.3" # for fog/AWS
+
+  # ruby 2.7.7 specific restrictions
+  gem.add_dependency "dry-core", "< 1.0"
+  gem.add_dependency "dry-inflector", "< 1.0"
+  gem.add_dependency "zeitwerk", "< 2.7"
 
   gem.add_development_dependency "rake"
   gem.add_development_dependency "rspec"
