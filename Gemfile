@@ -55,3 +55,5 @@ group :no_ci do
   gem 'redcarpet'
   # gem 'rake' - this will interfere with `rake gemspec`
 end
+
+gem "xmlrpc", "~> 0.3.3"

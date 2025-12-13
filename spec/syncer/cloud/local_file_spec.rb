@@ -37,6 +37,7 @@ describe Syncer::Cloud::LocalFile do
       # This fails on OSX, see https://github.com/backup/backup/issues/482
       # for more information.
       it 'returns a Hash of LocalFile objects, keyed by relative path' do
+        pending 'Fails on macOS due to filesystem not supporting invalid UTF-8 filenames' if RUBY_PLATFORM =~ /darwin/
         Dir.chdir(@tmpdir) do
           bad_file = "sync_dir/bad\xFFfile"
           sanitized_bad_file = "sync_dir/bad\xEF\xBF\xBDfile"

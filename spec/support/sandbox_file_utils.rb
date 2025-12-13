@@ -233,14 +233,32 @@ module SandboxFileUtils
     private
 
     def protect!(list)
-      list = Array(list).flatten.map {|p| File.expand_path(p) }
-      path = current_sandbox_path + '/'
+      # Normalize paths to handle macOS /private/var vs /var symlink issue
+      # Also handle encoding issues with invalid UTF-8 byte sequences
+      normalize_path = lambda do |p|
+        expanded = File.expand_path(p)
+        # Handle invalid UTF-8 by treating as binary, then normalizing
+        expanded = expanded.dup.force_encoding('BINARY').encode('UTF-8', invalid: :replace, undef: :replace) if expanded.respond_to?(:encode)
+        expanded.sub(%r{^/private}, '')
+      rescue
+        # If encoding fails, use the path as-is and handle in comparison
+        File.expand_path(p)
+      end
+      list = Array(list).flatten.map(&normalize_path)
+      path = normalize_path.call(current_sandbox_path) + '/'
       unless list.all? {|p| p.start_with?(path) || p == path.chomp('/') }
+        # Handle encoding issues with invalid UTF-8 byte sequences in paths
+        safe_list = list.map do |p|
+          p.dup.force_encoding('UTF-8').encode('UTF-8', invalid: :replace, undef: :replace)
+        rescue
+          p.inspect
+        end
+        safe_path = path.dup.force_encoding('UTF-8').encode('UTF-8', invalid: :replace, undef: :replace) rescue path
         raise Error, <<-EOS.gsub(/^ +/, ''), caller(1)
           path(s) outside of the current sandbox path were detected.
-          sandbox_path: #{ path }
+          sandbox_path: #{ safe_path }
           path(s) for the current operation:
-          #{ list.join($/) }
+          #{ safe_list.join($/) }
         EOS
       end
     end
