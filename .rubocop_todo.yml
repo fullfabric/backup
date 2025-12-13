@@ -19,7 +19,7 @@ Lint/AssignmentInCondition:
     - 'lib/backup/syncer/cloud/local_file.rb'
 
 # Offense count: 2
-Lint/HandleExceptions:
+Lint/SuppressedException:
   Exclude:
     - 'lib/backup/storage/ftp.rb'
     - 'lib/backup/storage/sftp.rb'
@@ -78,7 +78,7 @@ Metrics/CyclomaticComplexity:
 # Offense count: 233
 # Configuration parameters: AllowHeredoc, AllowURI, URISchemes, IgnoreCopDirectives, IgnoredPatterns.
 # URISchemes: http, https
-Metrics/LineLength:
+Layout/LineLength:
   Max: 134
 
 # Offense count: 87
@@ -97,13 +97,14 @@ Metrics/PerceivedComplexity:
 
 # Offense count: 2
 # Cop supports --auto-correct.
-Performance/Casecmp:
-  Exclude:
-    - 'lib/backup/storage/s3.rb'
-    - 'lib/backup/syncer/cloud/s3.rb'
+# Note: Performance/Casecmp requires rubocop-performance gem
+# Performance/Casecmp:
+#   Exclude:
+#     - 'lib/backup/storage/s3.rb'
+#     - 'lib/backup/syncer/cloud/s3.rb'
 
 # Offense count: 2
-Style/AccessorMethodName:
+Naming/AccessorMethodName:
   Exclude:
     - 'lib/backup/binder.rb'
     - 'lib/backup/config.rb'
@@ -152,7 +153,11 @@ Style/GuardClause:
     - 'spec/support/sandbox_file_utils.rb'
 
 # Offense count: 1
-Style/MethodMissing:
+# Note: Style/MethodMissing was split into Lint/MissingSuper and Style/MissingRespondToMissing
+Lint/MissingSuper:
+  Exclude:
+    - 'lib/backup/config/helpers.rb'
+Style/MissingRespondToMissing:
   Exclude:
     - 'lib/backup/config/helpers.rb'
 
@@ -181,7 +186,7 @@ Style/MutableConstant:
 # NamePrefix: is_, has_, have_
 # NamePrefixBlacklist: is_, has_, have_
 # NameWhitelist: is_a?
-Style/PredicateName:
+Naming/PredicatePrefix:
   Exclude:
     - 'spec/**/*'
     - 'lib/backup/cli.rb'
