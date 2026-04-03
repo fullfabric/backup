@@ -26,4 +26,7 @@ jobs:
           ruby-version: '2.7'
           bundler-cache: true
       - name: Run tests
-        run: bundle exec rubocop
+        run: |
+          # rubocop 0.48.1 reads .ruby-version and errors on versions it doesn't know
+          echo '2.4' > .ruby-version
+          bundle exec rubocop

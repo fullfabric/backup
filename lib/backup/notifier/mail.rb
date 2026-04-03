@@ -1,4 +1,5 @@
 require "mail"
+require "shellwords"
 
 module Backup
   module Notifier
@@ -205,12 +206,12 @@ module Backup
           when "sendmail"
             opts = {}
             opts[:location] = utility(:sendmail)
-            opts[:arguments] = @sendmail_args if @sendmail_args
+            opts[:arguments] = split_args(@sendmail_args) if @sendmail_args
             opts
           when "exim"
             opts = {}
             opts[:location] = utility(:exim)
-            opts[:arguments] = @exim_args if @exim_args
+            opts[:arguments] = split_args(@exim_args) if @exim_args
             opts
           when "file"
             @mail_folder ||= File.join(Config.root_path, "emails")
@@ -226,6 +227,10 @@ module Backup
         email.bcc      = bcc
         email.reply_to = reply_to
         email
+      end
+
+      def split_args(args)
+        args.is_a?(Array) ? args : args.shellsplit
       end
     end
   end
