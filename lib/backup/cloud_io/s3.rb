@@ -14,7 +14,7 @@ module Backup
 
       attr_reader :access_key_id, :secret_access_key, :use_iam_profile,
         :region, :bucket, :chunk_size, :encryption, :storage_class,
-        :fog_options
+        :tagging, :fog_options
 
       def initialize(options = {})
         super
@@ -27,6 +27,7 @@ module Backup
         @chunk_size         = options[:chunk_size]
         @encryption         = options[:encryption]
         @storage_class      = options[:storage_class]
+        @tagging            = options[:tagging]
         @fog_options        = options[:fog_options]
       end
 
@@ -208,6 +209,14 @@ module Backup
 
         sc = storage_class.to_s.upcase
         headers["x-amz-storage-class"] = sc unless sc.empty? || sc == "STANDARD"
+
+        # Object tags, as a URL-encoded query string, e.g. "tier=weekly". Set here rather
+        # than applied afterwards so the tag lands atomically with the object and there is
+        # no window in which it exists untagged. This method feeds both put_object and
+        # initiate_multipart_upload, and S3 honours x-amz-tagging on both, so single-part
+        # and multipart uploads are tagged alike.
+        tags = tagging.to_s
+        headers["x-amz-tagging"] = tags unless tags.empty?
 
         headers
       end

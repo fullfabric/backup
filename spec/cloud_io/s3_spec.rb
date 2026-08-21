@@ -781,6 +781,44 @@ module Backup
         allow(cloud_io).to receive(:storage_class).and_return("")
         expect(cloud_io.send(:headers)).to eq({})
       end
+
+      it "returns headers for object tagging" do
+        allow(cloud_io).to receive(:encryption).and_return(nil)
+        allow(cloud_io).to receive(:storage_class).and_return(nil)
+        allow(cloud_io).to receive(:tagging).and_return("tier=weekly")
+        expect(cloud_io.send(:headers)).to eq(
+          "x-amz-tagging" => "tier=weekly"
+        )
+      end
+
+      it "passes a multi-tag query string through verbatim" do
+        allow(cloud_io).to receive(:encryption).and_return(nil)
+        allow(cloud_io).to receive(:storage_class).and_return(nil)
+        allow(cloud_io).to receive(:tagging).and_return("tier=weekly&source=mongo")
+        expect(cloud_io.send(:headers)).to eq(
+          "x-amz-tagging" => "tier=weekly&source=mongo"
+        )
+      end
+
+      it "returns headers for encryption, storage class and tagging together" do
+        allow(cloud_io).to receive(:encryption).and_return(:aes256)
+        allow(cloud_io).to receive(:storage_class).and_return(:reduced_redundancy)
+        allow(cloud_io).to receive(:tagging).and_return("tier=daily")
+        expect(cloud_io.send(:headers)).to eq(
+          "x-amz-server-side-encryption" => "AES256",
+          "x-amz-storage-class" => "REDUCED_REDUNDANCY",
+          "x-amz-tagging" => "tier=daily"
+        )
+      end
+
+      it "omits the tagging header for empty and nil values" do
+        allow(cloud_io).to receive(:encryption).and_return(nil)
+        allow(cloud_io).to receive(:storage_class).and_return(nil)
+        [nil, ""].each do |arg|
+          allow(cloud_io).to receive(:tagging).and_return(arg)
+          expect(cloud_io.send(:headers)).to eq({})
+        end
+      end
     end # describe '#headers
 
     describe "Object" do

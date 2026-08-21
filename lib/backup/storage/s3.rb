@@ -64,6 +64,22 @@ module Backup
       attr_accessor :storage_class
 
       ##
+      # Object tags to set on every uploaded object, as a URL-encoded query string.
+      #
+      # e.g. "tier=weekly" or "tier=weekly&source=mongo"
+      #
+      # Applied via the x-amz-tagging header, so the tag lands atomically with the object
+      # rather than needing a PutObjectTagging call afterwards. This is what lets an S3
+      # lifecycle rule filter on the tag, since lifecycle can only match on prefix, tag and
+      # size, and cannot derive anything from the key or the upload time.
+      #
+      # Values are passed through verbatim; encode them if they contain characters that are
+      # not safe in a query string.
+      #
+      # Default: nil
+      attr_accessor :tagging
+
+      ##
       # Additional options to pass along to fog.
       # e.g. Fog::Storage.new({ :provider => 'AWS' }.merge(fog_options))
       attr_accessor :fog_options
@@ -93,6 +109,7 @@ module Backup
           bucket: bucket,
           encryption: encryption,
           storage_class: storage_class,
+          tagging: tagging,
           max_retries: max_retries,
           retry_waitsec: retry_waitsec,
           chunk_size: chunk_size,
