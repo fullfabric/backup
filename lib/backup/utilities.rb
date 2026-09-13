@@ -181,8 +181,20 @@ module Backup
           err = ""
           ps = Open4.popen4(command) do |_pid, stdin, stdout, stderr|
             stdin.close
-            out = stdout.read.strip
-            err = stderr.read.strip
+
+            # Both pipes must be drained at the same time. Reading stdout to EOF first
+            # deadlocks as soon as the child writes more than a pipe buffer (64 KiB on
+            # Linux) to stderr: stdout only reaches EOF when the child exits, and the
+            # child cannot exit while it is blocked writing to a full stderr pipe.
+            #
+            # mongodump hits this exactly. With --out it writes nothing to stdout and
+            # sends a "writing"/"done dumping" pair plus periodic progress to stderr, so
+            # a dump with enough collections or enough elapsed time hangs forever at 0%
+            # CPU with no output recorded anywhere.
+            out_reader = Thread.new { stdout.read }
+            err_reader = Thread.new { stderr.read }
+            out = out_reader.value.to_s.strip
+            err = err_reader.value.to_s.strip
           end
         rescue Exception => e
           raise Error.wrap(e, "Failed to execute '#{name}'")

@@ -1,4 +1,5 @@
 require "spec_helper"
+require "timeout"
 
 describe Backup::Utilities do
   let(:utilities) { Backup::Utilities }
@@ -405,6 +406,52 @@ describe Backup::Utilities::Helpers do
         }
       end
     end # context 'when the system fails to execute the command'
+
+    # The contexts above stub Open4 with doubles, so they pass whether or not the two
+    # pipes are drained concurrently. These run a real child process, which is the only
+    # way this class of bug shows up.
+    context "when a real command writes more to stderr than a pipe can hold" do
+      # A pipe holds 64 KiB on Linux. Writing comfortably past that to stderr while
+      # leaving stdout empty is what mongodump --out does over a long dump, and it used
+      # to hang forever: the parent sat in stdout.read waiting for an exit that could not
+      # happen while the child was blocked writing stderr.
+      let(:bytes) { 256 * 1024 }
+      let(:command) do
+        %(ruby -e '$stderr.write("x" * #{bytes}); $stderr.flush')
+      end
+
+      before { allow(Backup::Logger).to receive(:info) }
+
+      it "completes instead of deadlocking, and captures all of stderr" do
+        expect(Backup::Logger).to receive(:warn) do |message|
+          expect(message.length).to be >= bytes
+        end
+
+        result = Timeout.timeout(30) { helpers.send(:run, command) }
+
+        expect(result).to eq("")
+      end
+    end
+
+    context "when a real command writes heavily to both pipes at once" do
+      let(:bytes) { 128 * 1024 }
+      let(:command) do
+        %(ruby -e 'o = Thread.new { $stdout.write("o" * #{bytes}); $stdout.flush }; ) +
+          %($stderr.write("e" * #{bytes}); $stderr.flush; o.join')
+      end
+
+      before { allow(Backup::Logger).to receive(:info) }
+
+      it "captures both streams in full" do
+        expect(Backup::Logger).to receive(:warn) do |message|
+          expect(message.length).to be >= bytes
+        end
+
+        result = Timeout.timeout(30) { helpers.send(:run, command) }
+
+        expect(result.length).to eq(bytes)
+      end
+    end
   end # describe '#run'
 
   describe "gnu_tar?" do
