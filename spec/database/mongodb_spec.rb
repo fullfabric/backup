@@ -247,6 +247,117 @@ module Backup
       end
     end # describe '#mongodump'
 
+    describe "#mongodump_archive" do
+      let(:option_methods) do
+        %w[
+          name_option credential_options connectivity_options
+          ipv6_option oplog_option user_options
+        ]
+      end
+
+      it "returns the full mongodump command, writing an archive to STDOUT" do
+        option_methods.each { |name| allow(db).to receive(name).and_return(name) }
+        expect(db.send(:mongodump_archive)).to eq(
+          "mongodump name_option credential_options connectivity_options " \
+          "ipv6_option oplog_option user_options --archive"
+        )
+      end
+
+      # The streaming path was verified with --archive and then shipped with --out once
+      # already, and the bug lived only in the path that was never exercised. The two
+      # destinations are built from a shared #mongodump_options precisely so neither can
+      # appear in the other's command line; this is the assertion that says so.
+      it "never carries --out" do
+        db.name = "my_db"
+        expect(db.send(:mongodump_archive)).not_to include("--out")
+        expect(db.send(:mongodump)).to include("--out")
+      end
+    end # describe '#mongodump_archive'
+
+    describe "#streamable?" do
+      it "is streamable by default" do
+        expect(db.streamable?).to be true
+        expect(db.stream_unsupported_reason).to be_nil
+      end
+
+      # #only_collections runs one mongodump per collection. Concatenating the resulting
+      # --archive streams produces a file mongorestore cannot read, so this has to fall back
+      # to packaging rather than silently write an unrestorable object.
+      it "is not streamable when only_collections is set" do
+        db.only_collections = ["a_collection"]
+
+        expect(db.streamable?).to be false
+        expect(db.stream_unsupported_reason).to match(/only_collections/)
+      end
+    end # describe '#streamable?'
+
+    describe "#dump_stream" do
+      let(:pipeline) { double(StreamPipeline) }
+
+      before do
+        allow(StreamPipeline).to receive(:new).and_return(pipeline)
+        allow(db).to receive(:mongodump_archive).and_return("mongodump_archive_command")
+        allow(pipeline).to receive(:<<)
+        allow(pipeline).to receive(:run)
+      end
+
+      it "streams the archive command and yields the IO with its extension" do
+        expect(pipeline).to receive(:<<).with("mongodump_archive_command")
+
+        io = double("io")
+        allow(pipeline).to receive(:run).and_yield(io)
+
+        yielded = nil
+        db.dump_stream { |stream, ext| yielded = [stream, ext] }
+
+        expect(yielded).to eq([io, "archive"])
+      end
+
+      it "adds the model's compressor as a second stage and extends the extension" do
+        compressor = double(Compressor::Gzip)
+        allow(model).to receive(:compressor).and_return(compressor)
+        allow(compressor).to receive(:compress_with).and_yield("gzip", ".gz")
+
+        expect(pipeline).to receive(:<<).with("mongodump_archive_command").ordered
+        expect(pipeline).to receive(:<<).with("gzip").ordered
+
+        io = double("io")
+        allow(pipeline).to receive(:run).and_yield(io)
+
+        extension = nil
+        db.dump_stream { |_stream, ext| extension = ext }
+
+        expect(extension).to eq("archive.gz")
+      end
+
+      it "refuses to stream a database that cannot be streamed" do
+        db.only_collections = ["a_collection"]
+
+        expect { db.dump_stream { |_io, _ext| } }
+          .to raise_error(Database::MongoDB::Error, /only_collections/)
+      end
+
+      it "locks and unlocks the database when lock is set" do
+        db.lock = true
+        allow(pipeline).to receive(:run).and_yield(double("io"))
+
+        expect(db).to receive(:lock_database).ordered
+        expect(db).to receive(:unlock_database).ordered
+
+        db.dump_stream { |_io, _ext| }
+      end
+
+      it "unlocks the database even when the stream fails" do
+        db.lock = true
+        allow(db).to receive(:lock_database)
+        allow(pipeline).to receive(:run).and_raise("stream failed")
+
+        expect(db).to receive(:unlock_database)
+
+        expect { db.dump_stream { |_io, _ext| } }.to raise_error("stream failed")
+      end
+    end # describe '#dump_stream'
+
     describe "mongo and monogodump option methods" do
       describe "#name_option" do
         it "returns database argument if #name is specified" do

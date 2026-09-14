@@ -297,8 +297,79 @@ module Backup
     def procedures
       return [] unless databases.any? || archives.any?
 
-      [-> { prepare! }, databases, archives,
-       -> { package! }, -> { store! }, -> { clean! }]
+      if stream?
+        # No package! and no clean!, because there is no package: the dump is piped
+        # straight into the Storage. prepare! still runs, since a previous failed run may
+        # have left files behind that are nothing to do with this one's route.
+        [-> { prepare! }, -> { stream! }]
+      else
+        Logger.info "Packaging on disk rather than streaming, because " \
+          "#{stream_blockers.join("; and ")}."
+        [-> { prepare! }, databases, archives,
+         -> { package! }, -> { store! }, -> { clean! }]
+      end
+    end
+
+    ##
+    # Whether this model can be dumped straight to its Storage as a single stream, with
+    # nothing staged on disk.
+    #
+    # Packaging is not dead weight: it is the mechanism that lets one backup carry several
+    # sources as a single artefact -- databases/MongoDB.tar.gz alongside
+    # databases/PostgreSQL.sql.gz and any archives/. A stream is one source producing one
+    # object, so it is only equivalent to packaging when there is exactly one source, one
+    # destination, and nothing that transforms the package as a whole. Any other shape
+    # packages exactly as it did before.
+    def stream?
+      stream_blockers.empty?
+    end
+
+    ##
+    # The reasons this model cannot be streamed, so a fallback to packaging is a logged
+    # decision rather than something to be inferred from how long the run took.
+    def stream_blockers
+      @stream_blockers ||=
+        begin
+          blockers = []
+
+          if databases.count != 1
+            blockers << "#{databases.count} databases are configured, and one stream " \
+              "per database would be more than one object per backup"
+          end
+          blockers << "#{archives.count} Archive(s) are configured" if archives.any?
+          blockers << "an Encryptor is configured" if encryptor
+          blockers << "a Splitter is configured" if splitter
+
+          if storages.count != 1
+            blockers << "#{storages.count} Storages are configured, and a pipe can only " \
+              "be read once"
+          elsif !storages.first.respond_to?(:transfer_stream!, true)
+            blockers << "#{storages.first.class.name.sub("Backup::", "")} cannot store " \
+              "from a stream"
+          end
+
+          if databases.count == 1 && !databases.first.streamable?
+            blockers << databases.first.stream_unsupported_reason
+          end
+
+          blockers.compact
+        end
+    end
+
+    ##
+    # Pipes the single database dump through to the single Storage, so neither the dump nor
+    # the package ever touches the filesystem.
+    def stream!
+      database = databases.first
+      storage = storages.first
+
+      Logger.info "Streaming the dump directly to storage; nothing will be staged on disk."
+
+      database.dump_stream do |io, extension|
+        # Set before the Storage asks for #basename, since this is what names the object.
+        package.extension = extension
+        storage.perform_stream!(io)
+      end
     end
 
     ##

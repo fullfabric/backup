@@ -1,6 +1,6 @@
 require "spec_helper"
 
-describe "Backup::Model" do
+describe "Backup::Model" do # rubocop:disable Metrics/BlockLength
   let(:model) { Backup::Model.new(:test_trigger, "test label") }
   let(:s)     { sequence "" }
 
@@ -654,14 +654,18 @@ describe "Backup::Model" do
     end
 
     context "when databases are configured" do
+      # A real Database, not a Symbol: #procedures now asks whether the model can be
+      # streamed, and that question is put to the database.
+      let(:database) { double(streamable?: false, stream_unsupported_reason: "no") }
+
       before do
-        allow(model).to receive(:databases).and_return([:database])
+        allow(model).to receive(:databases).and_return([database])
       end
 
       it "returns all procedures" do
         one, two, three, four, five, six = model.send(:procedures)
         expect(one.call).to eq(:prepare)
-        expect(two).to eq([:database])
+        expect(two).to eq([database])
         expect(three).to eq([])
         expect(four.call).to eq(:package)
         expect(five.call).to eq([:storage])
@@ -685,6 +689,130 @@ describe "Backup::Model" do
       end
     end
   end # describe '#procedures'
+
+  describe "#stream?" do
+    let(:model) { Backup::Model.new(:test_trigger, "test label") }
+    let(:database) { double("database", streamable?: true, stream_unsupported_reason: nil) }
+    let(:storage) { double("storage") }
+
+    before do
+      allow(storage).to receive(:respond_to?).with(:transfer_stream!, true).and_return(true)
+      allow(model).to receive(:databases).and_return([database])
+      allow(model).to receive(:storages).and_return([storage])
+    end
+
+    it "streams one database to one storage with nothing else configured" do
+      expect(model.send(:stream?)).to be true
+      expect(model.send(:stream_blockers)).to eq([])
+    end
+
+    # Packager is what lets one backup carry several sources as a single artefact. With two
+    # databases, one --archive stream each would mean two objects rather than one, so this
+    # has to package exactly as it did before.
+    it "packages when more than one database is configured" do
+      allow(model).to receive(:databases).and_return([database, database])
+
+      expect(model.send(:stream?)).to be false
+      expect(model.send(:stream_blockers).join).to match(/2 databases/)
+    end
+
+    it "packages when an Archive is configured" do
+      allow(model).to receive(:archives).and_return([double("archive")])
+
+      expect(model.send(:stream?)).to be false
+      expect(model.send(:stream_blockers).join).to match(/Archive/)
+    end
+
+    it "packages when an Encryptor is configured" do
+      allow(model).to receive(:encryptor).and_return(double("encryptor"))
+
+      expect(model.send(:stream?)).to be false
+      expect(model.send(:stream_blockers).join).to match(/Encryptor/)
+    end
+
+    it "packages when a Splitter is configured" do
+      allow(model).to receive(:splitter).and_return(double("splitter"))
+
+      expect(model.send(:stream?)).to be false
+      expect(model.send(:stream_blockers).join).to match(/Splitter/)
+    end
+
+    it "packages when more than one Storage is configured, since a pipe reads once" do
+      allow(model).to receive(:storages).and_return([storage, storage])
+
+      expect(model.send(:stream?)).to be false
+      expect(model.send(:stream_blockers).join).to match(/Storages/)
+    end
+
+    it "packages when the Storage cannot store from a stream" do
+      allow(storage).to receive(:respond_to?).with(:transfer_stream!, true).and_return(false)
+      allow(storage).to receive(:class).and_return(Backup::Storage::Local)
+
+      expect(model.send(:stream?)).to be false
+      expect(model.send(:stream_blockers).join).to match(/cannot store from a stream/)
+    end
+
+    it "packages when the database cannot be streamed, and says why" do
+      allow(database).to receive(:streamable?).and_return(false)
+      allow(database).to receive(:stream_unsupported_reason).and_return("because reasons")
+
+      expect(model.send(:stream?)).to be false
+      expect(model.send(:stream_blockers)).to eq(["because reasons"])
+    end
+  end # describe '#stream?'
+
+  describe "#procedures when streaming" do
+    let(:model) { Backup::Model.new(:test_trigger, "test label") }
+
+    before do
+      allow(model).to receive(:stream?).and_return(true)
+      allow(model).to receive(:databases).and_return([double("database")])
+      allow(model).to receive(:prepare!).and_return(:prepare)
+      allow(model).to receive(:stream!).and_return(:stream)
+    end
+
+    it "prepares and streams, with no package! and no clean!" do
+      procedures = model.send(:procedures)
+
+      expect(procedures.size).to eq(2)
+      expect(procedures[0].call).to eq(:prepare)
+      expect(procedures[1].call).to eq(:stream)
+    end
+  end
+
+  describe "#stream!" do
+    let(:model) { Backup::Model.new(:test_trigger, "test label") }
+    let(:database) { double("database") }
+    let(:storage) { double("storage") }
+    let(:io) { double("io") }
+
+    before do
+      allow(Backup::Logger).to receive(:info)
+      allow(model).to receive(:databases).and_return([database])
+      allow(model).to receive(:storages).and_return([storage])
+    end
+
+    it "pipes the dump into the storage" do
+      allow(database).to receive(:dump_stream).and_yield(io, "archive.gz")
+
+      expect(storage).to receive(:perform_stream!).with(io)
+
+      model.send(:stream!)
+    end
+
+    # The extension names the object, and the Storage asks for it while the stream is still
+    # open, so it has to be set before the Storage is handed the IO.
+    it "names the package from the extension the database reports" do
+      allow(database).to receive(:dump_stream).and_yield(io, "archive.gz")
+      allow(storage).to receive(:perform_stream!) do
+        expect(model.package.basename).to eq("test_trigger.archive.gz")
+      end
+
+      model.send(:stream!)
+
+      expect(model.package.extension).to eq("archive.gz")
+    end
+  end # describe '#stream!'
 
   describe "#prepare!" do
     it "should prepare for the backup" do

@@ -22,11 +22,13 @@ module Backup
     it_behaves_like "a class that includes Config::Helpers" do
       let(:default_overrides) do
         { "chunk_size" => 15,
+          "upload_concurrency" => 8,
           "encryption" => :aes256,
           "storage_class" => :reduced_redundancy }
       end
       let(:new_overrides) do
         { "chunk_size" => 20,
+          "upload_concurrency" => 2,
           "encryption" => "aes256",
           "storage_class" => "standard" }
       end
@@ -50,6 +52,7 @@ module Backup
         expect(storage.region).to be_nil
         expect(storage.path).to eq "backups"
         expect(storage.chunk_size).to be 5
+        expect(storage.upload_concurrency).to be 4
         expect(storage.max_retries).to be 10
         expect(storage.retry_waitsec).to be 30
         expect(storage.encryption).to be_nil
@@ -66,6 +69,7 @@ module Backup
           s3.region             = "my_region"
           s3.path               = "my/path"
           s3.chunk_size         = 10
+          s3.upload_concurrency = 6
           s3.max_retries        = 5
           s3.retry_waitsec      = 60
           s3.encryption         = "aes256"
@@ -82,6 +86,7 @@ module Backup
         expect(storage.region).to eq "my_region"
         expect(storage.path).to eq "my/path"
         expect(storage.chunk_size).to be 10
+        expect(storage.upload_concurrency).to be 6
         expect(storage.max_retries).to be 5
         expect(storage.retry_waitsec).to be 60
         expect(storage.encryption).to eq "aes256"
@@ -227,6 +232,7 @@ module Backup
           max_retries: 10,
           retry_waitsec: 30,
           chunk_size: 5,
+          upload_concurrency: 4,
           fog_options: nil
         ).and_return(:cloud_io)
 
@@ -249,6 +255,7 @@ module Backup
           max_retries: 10,
           retry_waitsec: 30,
           chunk_size: 5,
+          upload_concurrency: 4,
           fog_options: nil
         ).and_return(:cloud_io)
 

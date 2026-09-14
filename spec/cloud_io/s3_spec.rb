@@ -1,8 +1,9 @@
 require "spec_helper"
 require "backup/cloud_io/s3"
+require "timeout"
 
-module Backup
-  describe CloudIO::S3 do
+module Backup # rubocop:disable Metrics/ModuleLength
+  describe CloudIO::S3 do # rubocop:disable Metrics/BlockLength
     let(:connection) { double }
 
     describe "#upload" do
@@ -661,6 +662,352 @@ module Backup
         )
       end
     end # describe '#upload_parts'
+
+    describe "#upload_stream" do
+      # A real OS pipe, not a StringIO. The read loop relies on IO#read(n) blocking until it
+      # has n bytes or hits EOF, which is a property of the IO, and a StringIO would satisfy
+      # the loop whether or not that held.
+      # Bytes the producer has managed to push into the pipe so far. How far it gets ahead of
+      # the consumer is the observable signature of backpressure.
+      attr_accessor :bytes_written
+
+      def piped(data, chunk: nil)
+        self.bytes_written = 0
+        reader, writer = IO.pipe
+        producer = Thread.new do
+          begin
+            if chunk
+              offset = 0
+              while offset < data.bytesize
+                slice = data.byteslice(offset, chunk)
+                writer.write(slice)
+                offset += slice.bytesize
+                self.bytes_written = offset
+              end
+            else
+              writer.write(data)
+              self.bytes_written = data.bytesize
+            end
+          rescue Errno::EPIPE
+            # The consumer gave up early, which is the point of several of these examples.
+            nil
+          ensure
+            writer.close
+          end
+        end
+        begin
+          yield reader
+        ensure
+          # Close first, then join. On the failure paths the consumer stops reading, and a
+          # producer blocked on a full pipe only comes back once the read end is gone.
+          reader.close unless reader.closed?
+          producer.join
+        end
+      end
+
+      let(:cloud_io) do
+        CloudIO::S3.new(
+          bucket: "my_bucket",
+          chunk_size: 1,
+          upload_concurrency: concurrency,
+          tagging: "tier=weekly",
+          max_retries: 1,
+          retry_waitsec: 0
+        )
+      end
+      let(:concurrency) { 1 }
+      let(:part_bytes) { 1024**2 }
+
+      before do
+        # S3 really does require 5 MiB parts, but that would mean pushing tens of megabytes
+        # through a pipe to get enough parts to say anything about ordering or growth. This
+        # relaxes S3's rule, not ours: every code path under test is the production one.
+        stub_const("Backup::CloudIO::S3::MIN_PART_SIZE", 1024)
+
+        allow(Logger).to receive(:info)
+        allow(Logger).to receive(:warn)
+        allow(cloud_io).to receive(:connection).and_return(connection)
+        allow(cloud_io).to receive(:new_connection).and_return(connection)
+        allow(connection).to receive(:initiate_multipart_upload)
+          .and_return(double("response", body: { "UploadId" => "upload-1" }))
+        allow(connection).to receive(:complete_multipart_upload)
+          .and_return(double("response", body: {}))
+      end
+
+      # Two things ride on this tag, and the second one is unrecoverable.
+      #
+      # The retention lifecycle rules keep Mondays a year and everything else 90 days, so an
+      # untagged object falls onto the 400-day backstop -- wrong, but recoverable. The
+      # cross-account vault replication rule (SQ3-1440) also filters on tier=weekly, and it
+      # is evaluated at object creation and never re-fires on a later tag change. Past seven
+      # days that vault is the only copy of the database outside eu-west-1, so a Monday that
+      # misses the tag is a permanent, silent hole in it.
+      #
+      # Which is why this is asserted on the InitiateMultipartUpload call specifically:
+      # tagging afterwards would pass a get-object-tagging check and still never replicate.
+      it "sends x-amz-tagging when initiating the upload" do
+        expect(connection).to receive(:initiate_multipart_upload).with(
+          "my_bucket", "dest/file", hash_including("x-amz-tagging" => "tier=weekly")
+        ).and_return(double("response", body: { "UploadId" => "upload-1" }))
+        allow(connection).to receive(:upload_part)
+          .and_return(double("response", headers: { "ETag" => "etag" }))
+
+        piped("x") { |io| cloud_io.upload_stream(io, "dest/file") }
+      end
+
+      # The streaming and packaged paths must build the same headers, or a change to one
+      # silently changes what the other writes.
+      it "builds the same headers as the packaged upload path" do
+        expect(cloud_io.send(:headers)).to include("x-amz-tagging" => "tier=weekly")
+      end
+
+      it "refuses to create an object at all if the tag went missing" do
+        allow(cloud_io).to receive(:headers).and_return({})
+
+        expect(connection).to receive(:initiate_multipart_upload).never
+
+        expect do
+          piped("x") { |io| cloud_io.upload_stream(io, "dest/file") }
+        end.to raise_error(CloudIO::S3::Error, /Object Tagging Lost/)
+      end
+
+      it "splits the stream into parts and completes the upload" do
+        # Two full parts plus a remainder.
+        data = "abcdefghij" * (part_bytes / 10 * 2 + 5)
+        sent = []
+
+        allow(connection).to receive(:upload_part) do |_b, _d, _u, number, body, _h|
+          sent << [number, body.read.bytesize]
+          double("response", headers: { "ETag" => "etag-#{number}" })
+        end
+
+        expect(connection).to receive(:complete_multipart_upload)
+          .with("my_bucket", "dest/file", "upload-1", %w[etag-1 etag-2 etag-3])
+          .and_return(double("response", body: {}))
+
+        piped(data) { |io| cloud_io.upload_stream(io, "dest/file") }
+
+        expect(sent.sort).to eq(
+          [[1, part_bytes], [2, part_bytes], [3, data.bytesize - part_bytes * 2]]
+        )
+      end
+
+      context "with concurrent part uploads" do
+        let(:concurrency) { 4 }
+
+        # The strongest statement available without talking to S3: reassemble the object the
+        # way S3 would -- concatenating part bodies in the order the ETags were handed to
+        # CompleteMultipartUpload -- and require it to be byte-identical to what went in.
+        #
+        # A transposition here does not raise. It produces an object that uploads cleanly,
+        # passes every tagging and object-count check, and is discovered to be garbage at
+        # restore time, which is the worst moment to discover it.
+        it "assembles byte-identically to the input when parts complete out of order" do
+          data = (1..8).map { |n| n.to_s * part_bytes }.join
+          bodies = {}
+
+          allow(connection).to receive(:upload_part) do |_b, _d, _u, number, body, _h|
+            bodies["etag-#{number}"] = body.read
+            # Later parts finish first, so append order and part order disagree.
+            sleep((9 - number) * 0.01)
+            double("response", headers: { "ETag" => "etag-#{number}" })
+          end
+
+          completed = nil
+          allow(connection).to receive(:complete_multipart_upload) do |_b, _d, _u, etags|
+            completed = etags
+            double("response", body: {})
+          end
+
+          piped(data) { |io| cloud_io.upload_stream(io, "dest/file") }
+
+          expect(completed.map { |etag| bodies.fetch(etag) }.join).to eq(data)
+        end
+
+        # Parts are acknowledged in whatever order the uploads finish, but
+        # CompleteMultipartUpload needs them in part order or S3 assembles the object wrong.
+        it "completes with the ETags in part order regardless of completion order" do
+          data = "z" * (part_bytes * 8)
+
+          allow(connection).to receive(:upload_part) do |_b, _d, _u, number, _body, _h|
+            # Later parts finish first.
+            sleep((9 - number) * 0.01)
+            double("response", headers: { "ETag" => "etag-#{number}" })
+          end
+
+          expect(connection).to receive(:complete_multipart_upload)
+            .with(
+              "my_bucket", "dest/file", "upload-1", (1..8).map { |n| "etag-#{n}" }
+            )
+            .and_return(double("response", body: {}))
+
+          piped(data) { |io| cloud_io.upload_stream(io, "dest/file") }
+        end
+
+        # The memory claim on Storage::S3#upload_concurrency is that roughly
+        # 2 x concurrency x chunk_size is in flight. That rests entirely on the queue being
+        # a SizedQueue, so this asserts the bound where it can actually be seen: how far the
+        # producer gets ahead while the uploads are slow.
+        #
+        # Counting parts inside #upload_part does NOT test this -- the worker count caps that
+        # number whether the queue is bounded or not, so the assertion passes either way.
+        # With a bounded queue the reader stops pushing and the producer blocks on a full
+        # pipe; with an unbounded one the reader swallows the entire stream into memory
+        # immediately and the producer runs to completion.
+        it "stops reading the stream when the uploads fall behind" do
+          total_parts = 40
+          seen = 0
+          progress = nil
+          counter = Mutex.new
+
+          allow(connection).to receive(:upload_part) do |_b, _d, _u, number, _body, _h|
+            counter.synchronize do
+              seen += 1
+              progress ||= bytes_written if seen == 5
+            end
+            sleep 0.02 # slower than the reader can produce parts
+            double("response", headers: { "ETag" => "etag-#{number}" })
+          end
+
+          data = "z" * (part_bytes * total_parts)
+          piped(data, chunk: part_bytes) do |io|
+            cloud_io.upload_stream(io, "dest/file")
+          end
+
+          # By the fifth part the producer must still have most of the stream to send.
+          #
+          # The theoretical bound is (2 x concurrency + 1) parts -- the queue, the workers,
+          # and the one being read -- which measured 9 MiB of the 40. Unbounded measured
+          # 31 MiB, so half the stream sits well clear of both.
+          expect(progress).to be < data.bytesize / 2
+        end
+
+        it "gives each worker its own connection, since fog is not thread-safe" do
+          allow(connection).to receive(:upload_part)
+            .and_return(double("response", headers: { "ETag" => "etag" }))
+
+          expect(cloud_io).to receive(:new_connection).exactly(4).times
+            .and_return(connection)
+
+          piped("x" * part_bytes) { |io| cloud_io.upload_stream(io, "dest/file") }
+        end
+
+        # An exception raised inside a Thread is swallowed unless someone looks for it. The
+        # dangerous outcome is not a crash, it is an upload that completes with a part
+        # missing and is only found to be broken at restore.
+        it "never completes the upload when a worker loses a part" do
+          allow(connection).to receive(:upload_part) do |_b, _d, _u, number, _body, _h|
+            raise "part #{number} failed" if number == 5
+            double("response", headers: { "ETag" => "etag-#{number}" })
+          end
+          allow(connection).to receive(:abort_multipart_upload)
+
+          expect(connection).to receive(:complete_multipart_upload).never
+
+          expect do
+            Timeout.timeout(30) do
+              piped("z" * (part_bytes * 8)) { |io| cloud_io.upload_stream(io, "dest/file") }
+            end
+          end.to raise_error(CloudIO::Error, /part 5 failed/)
+        end
+
+        it "aborts and re-raises when a part fails, without hanging" do
+          allow(connection).to receive(:upload_part) do |_b, _d, _u, number, _body, _h|
+            raise "part #{number} failed" if number == 2
+            double("response", headers: { "ETag" => "etag-#{number}" })
+          end
+
+          expect(connection).to receive(:abort_multipart_upload)
+            .with("my_bucket", "dest/file", "upload-1")
+          expect(connection).to receive(:complete_multipart_upload).never
+
+          expect do
+            Timeout.timeout(30) do
+              piped("z" * (part_bytes * 8)) { |io| cloud_io.upload_stream(io, "dest/file") }
+            end
+          end.to raise_error(CloudIO::Error, /part 2 failed/)
+        end
+      end
+
+      it "aborts the upload when completing it fails, leaving no object behind" do
+        allow(connection).to receive(:upload_part)
+          .and_return(double("response", headers: { "ETag" => "etag" }))
+        allow(connection).to receive(:complete_multipart_upload).and_raise("complete failed")
+
+        expect(connection).to receive(:abort_multipart_upload)
+          .with("my_bucket", "dest/file", "upload-1")
+
+        expect do
+          piped("x") { |io| cloud_io.upload_stream(io, "dest/file") }
+        end.to raise_error(/complete failed/)
+      end
+
+      it "does not mask the real error when the abort itself fails" do
+        allow(connection).to receive(:upload_part).and_raise("part failed")
+        allow(connection).to receive(:abort_multipart_upload).and_raise("abort failed")
+
+        expect do
+          piped("x") { |io| cloud_io.upload_stream(io, "dest/file") }
+        end.to raise_error(CloudIO::Error, /part failed/)
+      end
+
+      # A stream has no size to plan against, so the part size grows rather than the upload
+      # dying at part 10,001 after hours of work.
+      it "grows the part size once the stream passes the growth threshold" do
+        stub_const("Backup::CloudIO::S3::PART_SIZE_GROWTH_AFTER", 2)
+        stub_const("Backup::CloudIO::S3::MAX_STREAM_PART_SIZE", part_bytes * 2)
+
+        sizes = []
+        allow(connection).to receive(:upload_part) do |_b, _d, _u, number, body, _h|
+          sizes << body.read.bytesize
+          double("response", headers: { "ETag" => "etag-#{number}" })
+        end
+
+        piped("z" * (part_bytes * 6)) { |io| cloud_io.upload_stream(io, "dest/file") }
+
+        # Two parts at 1 MiB, then the size doubles for the rest.
+        expect(sizes.first(2)).to eq([part_bytes, part_bytes])
+        expect(sizes[2]).to eq(part_bytes * 2)
+        expect(sizes.sum).to eq(part_bytes * 6)
+      end
+
+      it "refuses a stream that needs more parts than S3 allows" do
+        stub_const("Backup::CloudIO::S3::MAX_PARTS", 2)
+        stub_const("Backup::CloudIO::S3::PART_SIZE_GROWTH_AFTER", 1_000)
+        allow(connection).to receive(:upload_part)
+          .and_return(double("response", headers: { "ETag" => "etag" }))
+        allow(connection).to receive(:abort_multipart_upload)
+
+        expect do
+          piped("z" * (part_bytes * 4)) { |io| cloud_io.upload_stream(io, "dest/file") }
+        end.to raise_error(CloudIO::S3::Error, /Stream Too Large/)
+      end
+
+      context "when #chunk_size cannot be used for a stream" do
+        let(:cloud_io) do
+          CloudIO::S3.new(
+            bucket: "my_bucket",
+            chunk_size: 0, # multipart disabled, which a stream cannot honour
+            upload_concurrency: 1,
+            max_retries: 1,
+            retry_waitsec: 0
+          )
+        end
+
+        it "falls back to the default stream part size" do
+          sizes = []
+          allow(connection).to receive(:upload_part) do |_b, _d, _u, number, body, _h|
+            sizes << body.read.bytesize
+            double("response", headers: { "ETag" => "etag-#{number}" })
+          end
+
+          piped("z" * 1024) { |io| cloud_io.upload_stream(io, "dest/file") }
+
+          # One short part, because the data ran out well before 64 MiB.
+          expect(sizes).to eq([1024])
+        end
+      end
+    end # describe '#upload_stream'
 
     describe "#complete_multipart" do
       let(:cloud_io) do

@@ -24,6 +24,22 @@ module Backup
         prepare!
       end
 
+      ##
+      # Whether this database can be dumped as a single stream to a Storage, skipping the
+      # on-disk package entirely. Subclasses that implement #dump_stream override this.
+      #
+      # Defaults to false so that any database type which has not been given a streaming
+      # dump keeps packaging exactly as before.
+      def streamable?
+        false
+      end
+
+      ##
+      # Why this database cannot be streamed, as a sentence for the log, or nil if it can.
+      def stream_unsupported_reason
+        "#{database_name} has no streaming dump" unless streamable?
+      end
+
       private
 
       def prepare!
