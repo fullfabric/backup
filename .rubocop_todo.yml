@@ -41,6 +41,12 @@ Lint/RescueException:
     - 'lib/backup/pipeline.rb'
     - 'lib/backup/utilities.rb'
     - 'spec/errors_spec.rb'
+    # Streaming teardown has to catch Interrupt and Timeout::Error, not just StandardError.
+    # Those are exactly the cases where a multipart upload must still be aborted and a
+    # running mongodump must still be killed; letting them past would leave a production
+    # dump running against Mongo with nothing reading its output.
+    - 'lib/backup/cloud_io/s3.rb'
+    - 'lib/backup/stream_pipeline.rb'
 
 # Offense count: 1
 Lint/ShadowedException:
@@ -70,6 +76,11 @@ Metrics/BlockNesting:
 # Configuration parameters: CountComments.
 Metrics/ClassLength:
   Max: 225
+  Exclude:
+    # Both gained the streaming path (SQ3-1488), which is a second way of doing what the
+    # class already did rather than something separable from it.
+    - 'lib/backup/cloud_io/s3.rb'
+    - 'lib/backup/model.rb'
 
 # Offense count: 11
 Metrics/CyclomaticComplexity:
@@ -90,6 +101,15 @@ Metrics/MethodLength:
 # Configuration parameters: CountComments.
 Metrics/ModuleLength:
   Max: 753
+
+# Offense count: 7
+# Offense count: 7
+# Configuration parameters: CountKeywordArgs.
+Metrics/ParameterLists:
+  Exclude:
+    # Block parameters standing in for a 6-argument fog method being stubbed. Not a design
+    # this repo chose, and not one a spec can shorten.
+    - 'spec/cloud_io/s3_spec.rb'
 
 # Offense count: 7
 Metrics/PerceivedComplexity:

@@ -134,6 +134,7 @@ module Backup
     packager
     pipeline
     splitter
+    stream_pipeline
     template
     version
   ].each { |lib| require File.join(LIBRARY_PATH, lib) }

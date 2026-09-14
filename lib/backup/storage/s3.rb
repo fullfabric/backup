@@ -30,6 +30,37 @@ module Backup
       attr_accessor :chunk_size
 
       ##
+      # Number of part uploads to run at once when storing from a stream.
+      #
+      # Only used by the streaming path. Uploading a finished file can afford to be serial,
+      # because the file is not going anywhere. A stream cannot: nothing buffers it, so the
+      # upload rate is a ceiling on the entire pipeline, and the serial loop's measured
+      # 79 MB/s is below what a poorly-compressing tenant produces.
+      #
+      # Measured on p-db2 (SQ3-1482/SQ3-1487):
+      #
+      #   concurrency  1     79 MB/s
+      #   concurrency  4    372 MB/s
+      #   concurrency 10    819 MB/s
+      #   concurrency 20    683 MB/s
+      #
+      # The default is 4 rather than the 10 at the knee, and that is a memory decision
+      # rather than caution. Roughly 2 x concurrency x #chunk_size is in flight at once,
+      # since each worker holds a part while the queue holds another: 512 MiB at 4 with a
+      # 64 MiB #chunk_size, but 1.25 GiB at 10. This runs on the database host, where that
+      # is page cache taken from Mongo for the length of the backup.
+      #
+      # 372 MB/s is not a compromise in practice. The largest tenant produces about
+      # 39 MB/s of compressed output, and the worst-compressing one measured (klu, 2.1:1)
+      # about 128 MB/s, so 4 already clears the requirement several times over and the
+      # dump stays the bottleneck, which is the point. Raise it if that stops being true.
+      #
+      # Set to 1 to get the old serial behaviour without changing anything else.
+      #
+      # Default: 4
+      attr_accessor :upload_concurrency
+
+      ##
       # Number of times to retry failed operations.
       #
       # Default: 10
@@ -87,11 +118,12 @@ module Backup
       def initialize(model, storage_id = nil)
         super
 
-        @chunk_size     ||= 5 # MiB
-        @max_retries    ||= 10
-        @retry_waitsec  ||= 30
-        @path           ||= "backups"
-        @storage_class  ||= :standard
+        @chunk_size         ||= 5 # MiB
+        @upload_concurrency ||= 4
+        @max_retries        ||= 10
+        @retry_waitsec      ||= 30
+        @path               ||= "backups"
+        @storage_class      ||= :standard
 
         @path = @path.sub(/^\//, "")
 
@@ -113,6 +145,7 @@ module Backup
           max_retries: max_retries,
           retry_waitsec: retry_waitsec,
           chunk_size: chunk_size,
+          upload_concurrency: upload_concurrency,
           fog_options: fog_options
         )
       end
@@ -124,6 +157,18 @@ module Backup
           Logger.info "Storing '#{bucket}/#{dest}'..."
           cloud_io.upload(src, dest)
         end
+      end
+
+      ##
+      # Uploads the live dump stream as a single multipart object, under the same key the
+      # packaged path would have used.
+      #
+      # A stream is never split, so there is exactly one object here, as there is on the
+      # packaged path for a model with no Splitter.
+      def transfer_stream!(io)
+        dest = File.join(remote_path, package.basename)
+        Logger.info "Storing '#{bucket}/#{dest}' from a stream..."
+        cloud_io.upload_stream(io, dest)
       end
 
       # Called by the Cycler.
@@ -154,6 +199,11 @@ module Backup
         raise Error, <<-EOS if chunk_size > 0 && !chunk_size.between?(5, 5120)
           Configuration Error
           #chunk_size must be between 5 and 5120 (or 0 to disable multipart)
+        EOS
+
+        raise Error, <<-EOS unless upload_concurrency.to_i.between?(1, 32)
+          Configuration Error
+          #upload_concurrency must be between 1 and 32
         EOS
 
         raise Error, <<-EOS if encryption && encryption.to_s.upcase != "AES256"

@@ -41,13 +41,30 @@ module Backup
       def perform!
         Logger.info "#{storage_name} Started..."
         transfer!
-        if respond_to?(:cycle!, true) && (keep.to_i > 0 || keep.is_a?(Time))
-          cycle!
-        end
+        cycle_if_configured!
+        Logger.info "#{storage_name} Finished!"
+      end
+
+      ##
+      # Stores the backup by reading +io+ to EOF, rather than by reading package files off
+      # disk. Only Storages which define #transfer_stream! can do this; Model#stream? checks
+      # for it before choosing the streaming route.
+      #
+      # +io+ is the live output of the dump pipeline, so it must be read to EOF or the
+      # upstream commands are left blocked on a full pipe.
+      def perform_stream!(io)
+        Logger.info "#{storage_name} Started..."
+        transfer_stream!(io)
+        cycle_if_configured!
         Logger.info "#{storage_name} Finished!"
       end
 
       private
+
+      def cycle_if_configured!
+        return unless respond_to?(:cycle!, true) && (keep.to_i > 0 || keep.is_a?(Time))
+        cycle!
+      end
 
       ##
       # Return the remote path for the current or given package.

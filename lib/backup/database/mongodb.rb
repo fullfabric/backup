@@ -62,6 +62,60 @@ module Backup
         unlock_database if @lock
       end
 
+      ##
+      # Dumps straight to a pipe with `mongodump --archive`, compressing on the way, and
+      # yields the IO carrying the compressed archive along with the extension it should be
+      # stored under. Nothing is written to disk.
+      #
+      # `--archive` with no argument writes the whole dump to STDOUT as a single stream,
+      # which is what makes this possible at all; it is restored with `mongorestore
+      # --archive`, not by pointing mongorestore at a dump directory.
+      #
+      # The yielded IO must be read to EOF by the block. See StreamPipeline for what
+      # happens if it is not.
+      def dump_stream
+        raise Error, <<-EOS if stream_unsupported_reason
+          Cannot stream this database
+          #{stream_unsupported_reason}
+        EOS
+
+        log!(:started)
+        lock_database if @lock
+
+        pipeline = StreamPipeline.new
+        extension = +"archive"
+
+        pipeline << mongodump_archive
+
+        if model.compressor
+          model.compressor.compress_with do |command, ext|
+            pipeline << command
+            extension << ext
+          end
+        end
+
+        pipeline.run { |io| yield io, extension }
+        log!(:finished)
+      ensure
+        unlock_database if @lock
+      end
+
+      ##
+      # Whether this database can be dumped as a single stream.
+      def streamable?
+        stream_unsupported_reason.nil?
+      end
+
+      ##
+      # Why it cannot be, as a sentence for the log, or nil if it can.
+      def stream_unsupported_reason
+        return nil if Array(only_collections).empty?
+
+        "#only_collections runs one mongodump per collection, and concatenating several " \
+          "--archive streams does not produce a restorable archive. Use " \
+          "--excludeCollection in #additional_options instead."
+      end
+
       private
 
       ##
@@ -117,10 +171,25 @@ module Backup
         File.join(dump_path, dump_filename)
       end
 
-      def mongodump
+      ##
+      # Options common to both output modes. Kept separate from the `--out` and `--archive`
+      # flags so that neither destination can leak into the other's command line: a change
+      # verified against `--archive` and then shipped as `--out` is exactly the mistake this
+      # split exists to make impossible.
+      def mongodump_options
         "#{utility(:mongodump)} #{name_option} #{credential_options} " \
           "#{connectivity_options} #{ipv6_option} #{oplog_option} " \
-          "#{user_options} --out='#{dump_packaging_path}'"
+          "#{user_options}"
+      end
+
+      # Writes a dump directory, for the package-on-disk path.
+      def mongodump
+        "#{mongodump_options} --out='#{dump_packaging_path}'"
+      end
+
+      # Writes a single archive to STDOUT, for the streaming path.
+      def mongodump_archive
+        "#{mongodump_options} --archive"
       end
 
       def name_option
