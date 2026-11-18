@@ -27,7 +27,12 @@ Gem::Specification.new do |gem|
 
   gem.required_ruby_version = Gem::Requirement.new(">= 2.3.0")
 
-  gem.add_dependency "thor", "~> 0.18", ">= 0.18.1"
+  # thor before 1.2 merges into DidYouMean::SPELL_CHECKERS when it loads, and Ruby 3.4 removed
+  # that constant, so `backup` died before reading its config (1.1.0 fails, 1.2.0 loads).
+  gem.add_dependency "thor", ">= 1.2", "< 2"
+  # Required directly by lib/, and bundled rather than default gems since Ruby 3.4.
+  gem.add_dependency "base64"
+  gem.add_dependency "syslog"
   gem.add_dependency "open4", "1.3.0"
   gem.add_dependency "fog", "~> 1.42"
   gem.add_dependency "excon", "~> 0.71"
