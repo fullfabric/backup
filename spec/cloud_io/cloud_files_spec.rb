@@ -361,7 +361,7 @@ module Backup # rubocop:disable Metrics/ModuleLength
             "--- Wrapped Exception ---\n" \
             "CloudIO::CloudFiles::Error: 400 Bad Request\n" \
             "  The server returned the following:\n" \
-            "  {\"Response Status\"=>\"400 Bad Request\"}"
+            "  #{resp_bad.body.inspect}"
           )
         }
         expect(Logger.messages.map(&:lines).join("\n")).to eq(
@@ -460,7 +460,7 @@ module Backup # rubocop:disable Metrics/ModuleLength
           "--- Wrapped Exception ---\n" \
           "CloudIO::CloudFiles::Error: 400 Bad Request\n" \
           "  The server returned the following:\n" \
-          "  {\"Response Status\"=>\"400 Bad Request\"}"
+          "  #{resp_bad.body.inspect}"
         )
       end
     end # describe '#delete_slo'
